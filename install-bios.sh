@@ -210,7 +210,7 @@ download_iso() {
     [[ $url == https://* ]] || die 'Use an HTTPS download URL.'
 
     work=$(mktemp -d /var/tmp/lightwhale-install.XXXXXXXX)
-    mkdir "$work/iso" "$work/boot"
+    mkdir "$work/iso" "$work/boot" "$work/efi"
 
     say 'Downloading and inspecting ISO before touching the disk'
     printf '%sTemporary download: %s%s\n' \
