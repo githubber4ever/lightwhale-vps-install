@@ -1,5 +1,5 @@
  #!/usr/bin/env bash
-# Provision a dedicated disk for legacy BIOS Lightwhale boot and persistence.
+# Provision a dedicated disk for UEFI Lightwhale boot and persistence.
 set -Eeuo pipefail
 export LC_ALL=C
 
@@ -12,10 +12,11 @@ device=''
 initial_identity=''
 url=''
 grub_install=''
-bios_modules=''
+efi_modules=''
 ramdisk_kb=''
 boot_mib=''
 boot_end=''
+efi_part=''
 boot_part=''
 data_part=''
 
@@ -24,10 +25,10 @@ usage() {
     printf '%s\n' \
         'Usage: sudo bash install-bios.sh' \
         '' \
-        'Interactive, destructive installer for a dedicated disk (legacy BIOS only).' \
-        'Creates BIOS GRUB + an ext2 ISO partition + a Lightwhale data partition.' \
+        'Interactive, destructive installer for a dedicated disk (UEFI only).' \
+        'Creates a UEFI system partition + an ext2 ISO partition + a Lightwhale data partition.' \
         'Run from your VPS provider live/rescue OS, not the target disk or stock Lightwhale.' \
-        'Requires Bash 4+, curl, util-linux, parted, e2fsprogs, and GRUB i386-pc modules.'
+        'Requires Bash 4+, curl, util-linux, parted, dosfstools, e2fsprogs, and GRUB x86_64-efi modules.'
 }
 
 # Handle help requests and reject unexpected arguments.
@@ -77,7 +78,7 @@ cleanup() {
     trap - EXIT
 
     if [[ -n $work ]]; then
-        for path in "$work/boot" "$work/iso"; do
+        for path in "$work/boot" "$work/efi" "$work/iso"; do
             if mountpoint -q "$path"; then
                 umount "$path" || failed=1
             fi
@@ -108,26 +109,27 @@ check_requirements() {
     local cmd
     local -a commands=(
         curl lsblk blkid blockdev parted partprobe udevadm
-        mkfs.ext2 wipefs mount umount mountpoint findmnt readlink
+        mkfs.ext2 mkfs.fat wipefs mount umount mountpoint findmnt readlink
         awk stat mktemp sync rm mkdir sleep cp cat
     )
 
     (( EUID == 0 )) || die 'Run with sudo bash install-bios.sh.'
     [[ -t 0 && -t 1 ]] || die 'An interactive terminal is required.'
+    [[ -d /sys/firmware/efi ]] || die 'Boot the rescue OS in UEFI mode.'
 
     for cmd in "${commands[@]}"; do
         command -v "$cmd" >/dev/null || die "Missing command: $cmd"
     done
 }
 
-# Locate a GRUB installer and its legacy BIOS modules.
+# Locate a GRUB installer and its UEFI modules.
 find_grub() {
     local dir
     local -a module_dirs=(
-        /usr/lib/grub/i386-pc
-        /usr/lib/grub2/i386-pc
-        /usr/share/grub/i386-pc
-        /usr/share/grub2/i386-pc
+        /usr/lib/grub/x86_64-efi
+        /usr/lib/grub2/x86_64-efi
+        /usr/share/grub/x86_64-efi
+        /usr/share/grub2/x86_64-efi
     )
 
     if command -v grub-install >/dev/null; then
@@ -135,26 +137,26 @@ find_grub() {
     elif command -v grub2-install >/dev/null; then
         grub_install=$(command -v grub2-install)
     else
-        die 'Install GRUB tools and the i386-pc (BIOS) modules first.'
+        die 'Install GRUB tools and the x86_64-efi modules first.'
     fi
 
     for dir in "${module_dirs[@]}"; do
         if [[ -f $dir/modinfo.sh ]]; then
-            bios_modules=$dir
+            efi_modules=$dir
             break
         fi
     done
 
-    [[ -n $bios_modules ]] ||
-        die 'GRUB BIOS modules missing (Debian: grub-pc-bin; Fedora: grub2-pc-modules).'
+    [[ -n $efi_modules ]] ||
+        die 'GRUB UEFI modules missing (Debian: grub-efi-amd64-bin; Fedora: grub2-efi-x64-modules).'
 }
 
 # Explain the destructive operation and select a supported whole disk.
 select_disk() {
-    say 'Lightwhale · BIOS disk setup'
+    say 'Lightwhale · UEFI disk setup'
     printf '%s\n' \
         'This erases the ENTIRE selected disk, including every existing partition.' \
-        'Boot the result in legacy BIOS / CSM mode, not UEFI-only mode.' \
+        'Boot the result in native UEFI mode, not legacy BIOS / CSM mode.' \
         'On first boot Lightwhale will format its data partition automatically.'
     printf '\n'
 
@@ -274,7 +276,7 @@ calculate_layout() {
         boot_mib=2048
     fi
 
-    boot_end=$((3 + boot_mib))
+    boot_end=$((513 + boot_mib))
     disk_bytes=$(blockdev --getsize64 "$device")
 
     (( disk_bytes / 1048576 > boot_end + 1025 )) ||
@@ -286,7 +288,7 @@ confirm_erasure() {
     local confirmation
 
     say "Proposed layout: $device"
-    printf '  Partition 1   2 MiB       BIOS GRUB embedding area\n'
+    printf '  Partition 1   512 MiB     FAT32 EFI system partition\n'
     printf '  Partition 2   %s MiB    ext2; /iso/lightwhale.iso and GRUB\n' "$boot_mib"
     printf '  Partition 3   remainder   Linux data; name lightwhale-please-format-me\n'
     printf '\nALL DATA ON %s WILL BE LOST.\n' "$device"
@@ -305,13 +307,13 @@ confirm_erasure() {
     check_disk_idle
 }
 
-# Replace the partition table with BIOS embedding, boot, and data partitions.
+# Replace the partition table with an EFI system partition, boot, and data partitions.
 create_partitions() {
     parted -s -a optimal "$device" -- \
         mklabel gpt \
-        mkpart BIOS-GRUB 1MiB 3MiB \
-        set 1 bios_grub on \
-        mkpart LIGHTWHALE-BOOT ext2 3MiB "${boot_end}MiB" \
+        mkpart EFI-SYSTEM fat32 1MiB 513MiB \
+        set 1 esp on \
+        mkpart LIGHTWHALE-BOOT ext2 513MiB "${boot_end}MiB" \
         mkpart lightwhale-please-format-me ext4 "${boot_end}MiB" 100%
 
     partprobe "$device"
@@ -323,6 +325,10 @@ find_partitions() {
     local attempt
 
     for attempt in {1..10}; do
+        efi_part=$(
+            lsblk -nrpo NAME,PARTLABEL "$device" |
+                awk '$2 == "EFI-SYSTEM" { print $1 }'
+        )
         boot_part=$(
             lsblk -nrpo NAME,PARTLABEL "$device" |
                 awk '$2 == "LIGHTWHALE-BOOT" { print $1 }'
@@ -332,22 +338,24 @@ find_partitions() {
                 awk '$2 == "lightwhale-please-format-me" { print $1 }'
         )
 
-        if [[ -b $boot_part && -b $data_part ]]; then
+        if [[ -b $efi_part && -b $boot_part && -b $data_part ]]; then
             break
         fi
 
         sleep 1
     done
 
-    [[ -b $boot_part && -b $data_part ]] ||
+    [[ -b $efi_part && -b $boot_part && -b $data_part ]] ||
         die 'New partition devices did not appear.'
 }
 
-# Clear stale data signatures and create and mount the ext2 boot filesystem.
+# Clear stale data signatures and create and mount the EFI and ext2 filesystems.
 prepare_filesystems() {
     wipefs --all "$data_part"
+    mkfs.fat -F 32 -n EFI-SYSTEM "$efi_part"
     mkfs.ext2 -F -L LWBOOT "$boot_part"
 
+    mount -o nosuid,nodev,noexec "$efi_part" "$work/efi"
     mount -o nosuid,nodev "$boot_part" "$work/boot"
     mkdir -p "$work/boot/iso" "$work/boot/boot/grub"
 }
@@ -377,18 +385,19 @@ menuentry 'Lightwhale' {
 EOF
 }
 
-# Copy the ISO as a file and install legacy BIOS GRUB onto the selected disk.
+# Copy the ISO as a file and install removable UEFI GRUB onto the selected disk.
 install_bootloader() {
     cp -- "$work/lightwhale.iso" "$work/boot/iso/lightwhale.iso"
     write_grub_config
 
     "$grub_install" \
-        --target=i386-pc \
-        --directory="$bios_modules" \
+        --target=x86_64-efi \
+        --directory="$efi_modules" \
+        --efi-directory="$work/efi" \
         --boot-directory="$work/boot/boot" \
         --modules='part_gpt ext2 loopback iso9660 search_fs_uuid linux' \
-        --recheck \
-        "$device"
+        --removable \
+        --recheck
 }
 
 # Verify that the data partition opts into Lightwhale first-boot formatting.
@@ -427,12 +436,12 @@ main() {
     calculate_layout
     confirm_erasure
 
-    step 1 'Creating GPT and BIOS boot partitions'
+    step 1 'Creating GPT and UEFI boot partitions'
     create_partitions
     find_partitions
     prepare_filesystems
 
-    step 2 'Writing ISO and installing BIOS GRUB'
+    step 2 'Writing ISO and installing UEFI GRUB'
     install_bootloader
 
     step 3 'Checking the data partition opt-in'

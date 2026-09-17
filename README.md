@@ -6,7 +6,7 @@ This guide covers a simple approach for installing the OS to disk (with a focus 
 
 ## Requirements
 
-- An x86-64 server supporting BIOS boot
+- An x86-64 server supporting native UEFI boot
 - A live/rescue Linux environment (ie. [SystemRescue](https://www.system-rescue.org/Download/) or whatever your VPS provides) and console access
 - A disk named `/dev/sdX`, `/dev/nvme…`, or `/dev/mmcblk…`. Note: Paravirtualized disks like `/dev/vda` are not yet supported
 
@@ -20,6 +20,8 @@ Boot a **live image or emergency recovery OS** from your VPS control panel. If a
 curl -o install-bios.sh https://raw.githubusercontent.com/MatthewScholefield/lightwhale-vps-install/main/install-bios.sh
 sudo bash install-bios.sh
 ```
+
+Run the rescue environment itself in UEFI mode. Legacy BIOS / CSM boot is not supported.
 
 Once finished, after a restart you should see the lightwhale login prompt and can login via `op` / `opsecret`.
 
