@@ -25,6 +25,17 @@ Run the rescue environment itself in UEFI mode. Legacy BIOS / CSM boot is not su
 
 Once finished, after a restart you should see the lightwhale login prompt and can login via `op` / `opsecret`.
 
+## Update Lightwhale
+
+Boot the VPS into its UEFI rescue environment and back up important data first. The updater stages and validates the new ISO before atomically switching GRUB to it; until that switch, the current ISO remains the active boot target. On success, the old ISO is removed. The data partition is not modified. `LWBOOT` needs enough free space to stage the new ISO alongside the current one.
+
+```bash
+curl -o update-lightwhale.sh https://raw.githubusercontent.com/MatthewScholefield/lightwhale-vps-install/main/update-lightwhale.sh
+sudo bash update-lightwhale.sh https://lightwhale.asklandd.dk/download/lightwhale-3.0.6-x86.iso
+```
+
+After it reports success, reboot from the normal disk. If the update fails before the GRUB switch, the existing ISO remains the active boot target.
+
 *Suggested next steps:*
  1. **Change passowrd:** Change password via `passwd`
     - NOTE: This is particularly important because unless your VPS has a firewall, by default Lightwhale exposes SSH with password auth
