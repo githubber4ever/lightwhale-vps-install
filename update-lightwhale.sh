@@ -87,9 +87,14 @@ if (( $# != 1 )); then
 fi
 url=$1
 [[ $url == https://* ]] || die 'Use an HTTPS ISO URL.'
+url_path=${url%%#*}
+url_path=${url_path%%\?*}
+downloaded_iso_basename=${url_path##*/}
+[[ $downloaded_iso_basename =~ ^[A-Za-z0-9][A-Za-z0-9._-]*\.iso$ ]] ||
+    die 'ISO URL must end with a safe .iso filename.'
 (( EUID == 0 )) || die 'Run with sudo.'
 
-for command_name in awk blkid chmod cmp cp curl date df findmnt grep mount mountpoint mv mktemp readlink rm sed stat sync umount; do
+for command_name in awk blkid chmod cmp cp curl df findmnt grep mount mountpoint mv mktemp readlink rm sed stat sync umount; do
     command -v "$command_name" >/dev/null || die "Missing command: $command_name"
 done
 
@@ -208,11 +213,20 @@ required_kb=$(( (new_iso_bytes + 1048576 + 1023) / 1024 ))
 (( available_kb >= required_kb )) ||
     die 'Not enough free space on LWBOOT to stage the new ISO safely.'
 
-stamp=$(date -u +%Y%m%dT%H%M%SZ)-$$
-new_iso_basename=lightwhale-update-$stamp.iso
+new_iso_basename=$downloaded_iso_basename
 new_iso_rel=/iso/$new_iso_basename
 new_iso_path=$boot_mount$new_iso_rel
-[[ ! -e $new_iso_path ]] || die 'New ISO filename collision; retry the update.'
+if [[ $new_iso_path == "$old_iso_path" ]]; then
+    if cmp -- "$work/lightwhale.iso" "$old_iso_path" >/dev/null 2>&1; then
+        say "ISO $new_iso_basename is already active; nothing to update."
+        exit 0
+    fi
+    die 'The URL filename matches the active ISO but its contents differ; use a versioned filename.'
+fi
+if [[ -e $new_iso_path || -L $new_iso_path ]]; then
+    [[ -f $new_iso_path && ! -L $new_iso_path ]] ||
+        die "Refusing to replace a non-regular ISO path: $new_iso_path"
+fi
 
 staged_iso=$(mktemp "$boot_mount/iso/.lightwhale.iso.new.XXXXXX")
 cp -- "$work/lightwhale.iso" "$staged_iso"
@@ -220,7 +234,7 @@ cmp -- "$work/lightwhale.iso" "$staged_iso" || die 'Staged ISO verification fail
 iso_mode=$(stat -c %a "$old_iso_path")
 [[ $iso_mode =~ ^[0-7]{3,4}$ ]] || die 'Could not determine the current ISO file mode.'
 chmod "$iso_mode" "$staged_iso"
-mv -- "$staged_iso" "$new_iso_path"
+mv -f -- "$staged_iso" "$new_iso_path"
 staged_iso=''
 
 final_config=$(mktemp "$boot_mount/boot/grub/.grub.cfg.update.XXXXXX")
