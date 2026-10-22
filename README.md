@@ -27,7 +27,7 @@ Once finished, after a restart you should see the lightwhale login prompt and ca
 
 ## Update Lightwhale
 
-Boot the VPS into its UEFI rescue environment and back up important data first. The updater stages and validates the new ISO before atomically switching GRUB to it; until that switch, the current ISO remains the active boot target. On success, the old ISO is removed. The data partition is not modified. `LWBOOT` needs enough free space to stage the new ISO alongside the current one.
+Boot the VPS into its UEFI rescue environment and back up important data first. The updater downloads and validates the new ISO in `/var/tmp`, then temporarily backs up the current ISO there before replacing it on `LWBOOT`. The data partition is not modified. `/var/tmp` needs space for the download and the previous ISO; `LWBOOT` needs space for the new ISO after the old one is removed. These filesystems must be separate.
 
 ```bash
 curl -o update-lightwhale.sh https://raw.githubusercontent.com/MatthewScholefield/lightwhale-vps-install/main/update-lightwhale.sh
@@ -35,6 +35,14 @@ sudo bash update-lightwhale.sh https://lightwhale.asklandd.dk/download/lightwhal
 ```
 
 After it reports success, reboot from the normal disk. If the update fails before the GRUB switch, the existing ISO remains the active boot target.
+
+If the destination filename already exists on `LWBOOT` but is not the active ISO, pass `--force` before the URL to replace it. The updater backs up that file in `/var/tmp` for rollback.
+
+By default, the updater removes the old active ISO before copying the new one to `LWBOOT`, minimizing boot-partition space usage. Pass `--atomic` to keep the old ISO active while the new one is copied and verified, then switch GRUB and remove the old ISO. This mode requires temporary room for both images on `LWBOOT`. The flags may be combined in either order.
+
+```bash
+sudo bash update-lightwhale.sh --atomic https://lightwhale.asklandd.dk/download/lightwhale-3.0.6-x86.iso
+```
 
 *Suggested next steps:*
  1. **Change passowrd:** Change password via `passwd`

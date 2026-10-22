@@ -9,10 +9,15 @@ owns_boot_mount=0
 rollback_needed=0
 committed=0
 old_iso_path=''
+old_iso_backup=''
 new_iso_path=''
+existing_iso_path=''
+existing_iso_backup=''
+existing_iso_mode=''
 rollback_config=''
-staged_iso=''
 final_config=''
+force_replace=0
+atomic_mode=0
 
 die() {
     printf 'Error: %s\n' "$*" >&2
@@ -20,7 +25,7 @@ die() {
 }
 
 usage() {
-    printf 'Usage: sudo bash update-lightwhale.sh <ISO_HTTPS_URL>\n'
+    printf 'Usage: sudo bash update-lightwhale.sh [--atomic] [--force] <ISO_HTTPS_URL>\n'
 }
 
 cleanup() {
@@ -31,38 +36,52 @@ cleanup() {
 
     trap - EXIT
 
-    if (( status != 0 && ! committed )); then
-        if (( rollback_needed )); then
-            printf 'Upgrade failed; restoring the previous GRUB config.\n' >&2
-            if [[ -n $rollback_config && -f $rollback_config ]]; then
-                mv -f -- "$rollback_config" "$boot_mount/boot/grub/grub.cfg" ||
-                    rollback_ok=0
-            else
+    if (( status != 0 && ! committed && rollback_needed )); then
+        printf 'Upgrade failed; restoring the previous GRUB config.\n' >&2
+        if [[ -n $rollback_config && -f $rollback_config ]]; then
+            mv -f -- "$rollback_config" "$boot_mount/boot/grub/grub.cfg" ||
+                rollback_ok=0
+        else
+            rollback_ok=0
+        fi
+        sync || rollback_ok=0
+
+        if (( rollback_ok )); then
+            if [[ -n $new_iso_path && $new_iso_path != "$old_iso_path" && -e $new_iso_path ]]; then
+                rm -f -- "$new_iso_path" || rollback_ok=0
+            fi
+            if [[ -n $old_iso_backup && -s $old_iso_backup ]]; then
+                rm -f -- "$old_iso_path" || rollback_ok=0
+                cp -- "$old_iso_backup" "$old_iso_path" || rollback_ok=0
+                cmp -- "$old_iso_backup" "$old_iso_path" || rollback_ok=0
+                chmod "$iso_mode" "$old_iso_path" || rollback_ok=0
+            elif [[ ! -s $old_iso_path ]]; then
                 rollback_ok=0
             fi
-            sync || rollback_ok=0
+            if [[ -n $existing_iso_backup && -f $existing_iso_backup ]]; then
+                cp -- "$existing_iso_backup" "$new_iso_path" || rollback_ok=0
+                cmp -- "$existing_iso_backup" "$new_iso_path" || rollback_ok=0
+                chmod "$existing_iso_mode" "$new_iso_path" || rollback_ok=0
+            fi
         fi
-        if (( rollback_ok )) && [[ -n $new_iso_path && -e $new_iso_path ]]; then
-            rm -f -- "$new_iso_path" ||
-                printf 'Could not remove inactive ISO: %s\n' "$new_iso_path" >&2
-        elif (( ! rollback_ok )); then
-            printf 'Could not restore the old boot config; leaving the new ISO in place at %s.\n' \
-                "$new_iso_path" >&2
+
+        if (( ! rollback_ok )); then
+            printf 'Rollback was incomplete; inspect %s and %s manually.\n' \
+                "$boot_mount" "$work" >&2
         fi
     fi
 
     if [[ -n $iso_mount ]] && mountpoint -q "$iso_mount"; then
         umount "$iso_mount" || { status=1; mounted=1; }
     fi
-    if (( owns_boot_mount )) && [[ -n $boot_mount ]] && mountpoint -q "$boot_mount"; then
-        umount "$boot_mount" || { status=1; mounted=1; }
-    fi
-
-    for path in "$staged_iso" "$rollback_config" "$final_config"; do
+    for path in "$rollback_config" "$final_config"; do
         if [[ -n $path && -e $path ]]; then
             rm -f -- "$path" || status=1
         fi
     done
+    if (( owns_boot_mount )) && [[ -n $boot_mount ]] && mountpoint -q "$boot_mount"; then
+        umount "$boot_mount" || { status=1; mounted=1; }
+    fi
 
     if [[ -n $work && $mounted == 0 ]]; then
         rm -rf -- "$work"
@@ -77,10 +96,29 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-if (( $# == 1 )) && [[ $1 == --help || $1 == -h ]]; then
-    usage
-    exit 0
-fi
+while (( $# )); do
+    case $1 in
+        --help|-h)
+            usage
+            exit 0
+            ;;
+        --force)
+            force_replace=1
+            shift
+            ;;
+        --atomic)
+            atomic_mode=1
+            shift
+            ;;
+        --)
+            shift
+            break
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
 if (( $# != 1 )); then
     usage >&2
     exit 2
@@ -122,6 +160,11 @@ else
     mount "$boot_part" "$boot_mount"
     owns_boot_mount=1
 fi
+
+work_device=$(stat -c %d "$work")
+boot_device=$(stat -c %d "$boot_mount")
+[[ $work_device != "$boot_device" ]] ||
+    die 'Temporary workspace must be on a different filesystem than LWBOOT.'
 
 [[ -d $boot_mount/iso ]] || die 'LWBOOT does not contain the iso directory.'
 [[ -s $boot_mount/boot/grub/grub.cfg ]] ||
@@ -199,43 +242,58 @@ old_ramdisk_kb=$((10#$old_ramdisk_kb))
     die 'Installed GRUB ramdisk_size is outside the supported range.'
 
 new_iso_bytes=$(stat -c %s "$work/lightwhale.iso")
+new_iso_basename=$downloaded_iso_basename
+new_iso_rel=/iso/$new_iso_basename
+new_iso_path=$boot_mount$new_iso_rel
 
 # Remove only orphaned images created by this updater, never the active GRUB target.
 for orphan in "$boot_mount"/iso/lightwhale-update-*.iso; do
     [[ -e $orphan ]] || continue
-    [[ $orphan == "$old_iso_path" ]] && continue
+    [[ $orphan == "$old_iso_path" || $orphan == "$new_iso_path" ]] && continue
     rm -f -- "$orphan" || die "Could not remove orphaned update ISO: $orphan"
 done
 
-available_kb=$(df -Pk "$boot_mount" | awk 'NR == 2 { print $4 }')
-[[ $available_kb =~ ^[0-9]+$ ]] || die 'Could not determine free space on LWBOOT.'
-required_kb=$(( (new_iso_bytes + 1048576 + 1023) / 1024 ))
-(( available_kb >= required_kb )) ||
-    die 'Not enough free space on LWBOOT to stage the new ISO safely.'
-
-new_iso_basename=$downloaded_iso_basename
-new_iso_rel=/iso/$new_iso_basename
-new_iso_path=$boot_mount$new_iso_rel
 if [[ $new_iso_path == "$old_iso_path" ]]; then
-    if cmp -- "$work/lightwhale.iso" "$old_iso_path" >/dev/null 2>&1; then
+    if (( ! force_replace )) && cmp -- "$work/lightwhale.iso" "$old_iso_path" >/dev/null 2>&1; then
         say "ISO $new_iso_basename is already active; nothing to update."
         exit 0
     fi
-    die 'The URL filename matches the active ISO but its contents differ; use a versioned filename.'
-fi
-if [[ -e $new_iso_path || -L $new_iso_path ]]; then
+    if (( atomic_mode )); then
+        die 'Atomic replacement needs a different ISO filename while the current file remains active; omit --atomic or use a distinct filename.'
+    fi
+elif [[ -e $new_iso_path || -L $new_iso_path ]]; then
     [[ -f $new_iso_path && ! -L $new_iso_path ]] ||
         die "Refusing to replace a non-regular ISO path: $new_iso_path"
+    (( force_replace )) ||
+        die "The destination ISO already exists but is not active; use --force to replace it: $new_iso_path"
+    existing_iso_path=$new_iso_path
+    existing_iso_mode=$(stat -c %a "$existing_iso_path")
+    [[ $existing_iso_mode =~ ^[0-7]{3,4}$ ]] ||
+        die 'Could not determine the existing destination ISO file mode.'
+    existing_iso_bytes=$(stat -c %s "$existing_iso_path")
 fi
 
-staged_iso=$(mktemp "$boot_mount/iso/.lightwhale.iso.new.XXXXXX")
-cp -- "$work/lightwhale.iso" "$staged_iso"
-cmp -- "$work/lightwhale.iso" "$staged_iso" || die 'Staged ISO verification failed.'
 iso_mode=$(stat -c %a "$old_iso_path")
 [[ $iso_mode =~ ^[0-7]{3,4}$ ]] || die 'Could not determine the current ISO file mode.'
-chmod "$iso_mode" "$staged_iso"
-mv -f -- "$staged_iso" "$new_iso_path"
-staged_iso=''
+old_iso_bytes=$(stat -c %s "$old_iso_path")
+tmp_available_kb=$(df -Pk "$work" | awk 'NR == 2 { print $4 }')
+[[ $tmp_available_kb =~ ^[0-9]+$ ]] || die 'Could not determine free space in the temporary directory.'
+required_tmp_kb=1024
+if (( ! atomic_mode )); then
+    required_tmp_kb=$(( required_tmp_kb + (old_iso_bytes + 1023) / 1024 ))
+fi
+if [[ -n $existing_iso_path ]]; then
+    required_tmp_kb=$(( required_tmp_kb + (existing_iso_bytes + 1023) / 1024 ))
+fi
+(( tmp_available_kb >= required_tmp_kb )) ||
+    die 'Not enough temporary space to preserve the current ISO for rollback.'
+
+if [[ -n $existing_iso_path ]]; then
+    existing_iso_backup=$work/existing-destination.iso
+    cp -- "$existing_iso_path" "$existing_iso_backup"
+    cmp -- "$existing_iso_path" "$existing_iso_backup" ||
+        die 'Could not verify the temporary backup of the existing destination ISO.'
+fi
 
 final_config=$(mktemp "$boot_mount/boot/grub/.grub.cfg.update.XXXXXX")
 rollback_config=$(mktemp "$boot_mount/boot/grub/.grub.cfg.rollback.XXXXXX")
@@ -252,9 +310,48 @@ new_loopback_count=$(grep -Fc "loopback loop $new_iso_rel" "$final_config" || tr
 new_ramdisk_count=$(grep -Fc "ramdisk_size=$new_ramdisk_kb" "$final_config" || true)
 (( new_ramdisk_count == 1 )) || die 'Could not prepare the new GRUB ramdisk_size.'
 
-say 'Switching GRUB atomically to the validated ISO'
+if (( ! atomic_mode )); then
+    old_iso_backup=$work/previous-lightwhale.iso
+    cp -- "$old_iso_path" "$old_iso_backup"
+    cmp -- "$old_iso_path" "$old_iso_backup" || die 'Could not verify the temporary backup of the current ISO.'
+    sync
+fi
 rollback_needed=1
-sync
+
+if (( atomic_mode )); then
+    say 'Staging the new ISO beside the active ISO'
+    if [[ -n $existing_iso_path ]]; then
+        rm -f -- "$new_iso_path"
+    fi
+    available_kb=$(df -Pk "$boot_mount" | awk 'NR == 2 { print $4 }')
+    [[ $available_kb =~ ^[0-9]+$ ]] || die 'Could not determine free space on LWBOOT.'
+    required_kb=$(( (new_iso_bytes + 1048576 + 1023) / 1024 ))
+    (( available_kb >= required_kb )) ||
+        die 'Not enough free space on LWBOOT to stage both ISO files atomically.'
+
+    cp -- "$work/lightwhale.iso" "$new_iso_path"
+    chmod "$iso_mode" "$new_iso_path"
+    cmp -- "$work/lightwhale.iso" "$new_iso_path" || die 'Copied ISO verification failed.'
+    sync
+else
+    say 'Replacing the ISO using the validated temporary download'
+    rm -f -- "$old_iso_path"
+    if [[ $new_iso_path != "$old_iso_path" ]]; then
+        rm -f -- "$new_iso_path"
+    fi
+    available_kb=$(df -Pk "$boot_mount" | awk 'NR == 2 { print $4 }')
+    [[ $available_kb =~ ^[0-9]+$ ]] || die 'Could not determine free space on LWBOOT.'
+    required_kb=$(( (new_iso_bytes + 1048576 + 1023) / 1024 ))
+    (( available_kb >= required_kb )) ||
+        die 'Not enough free space on LWBOOT after removing the old ISO; restoring it.'
+
+    cp -- "$work/lightwhale.iso" "$new_iso_path"
+    chmod "$iso_mode" "$new_iso_path"
+    cmp -- "$work/lightwhale.iso" "$new_iso_path" || die 'Copied ISO verification failed.'
+    sync
+fi
+
+say 'Switching GRUB atomically to the validated ISO'
 mv -f -- "$final_config" "$current_config"
 final_config=''
 sync
@@ -262,8 +359,10 @@ committed=1
 rollback_needed=0
 trap '' INT TERM
 
-rm -f -- "$old_iso_path" ||
-    printf 'Warning: old inactive ISO could not be removed: %s\n' "$old_iso_path" >&2
+if (( atomic_mode )) && [[ $old_iso_path != "$new_iso_path" ]]; then
+    rm -f -- "$old_iso_path" ||
+        printf 'Warning: old inactive ISO could not be removed: %s\n' "$old_iso_path" >&2
+fi
 
 rm -f -- "$rollback_config" ||
     printf 'Warning: temporary rollback config could not be removed: %s\n' "$rollback_config" >&2
