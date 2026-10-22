@@ -217,7 +217,9 @@ new_iso_path=$boot_mount$new_iso_rel
 staged_iso=$(mktemp "$boot_mount/iso/.lightwhale.iso.new.XXXXXX")
 cp -- "$work/lightwhale.iso" "$staged_iso"
 cmp -- "$work/lightwhale.iso" "$staged_iso" || die 'Staged ISO verification failed.'
-chmod --reference="$old_iso_path" "$staged_iso"
+iso_mode=$(stat -c %a "$old_iso_path")
+[[ $iso_mode =~ ^[0-7]{3,4}$ ]] || die 'Could not determine the current ISO file mode.'
+chmod "$iso_mode" "$staged_iso"
 mv -- "$staged_iso" "$new_iso_path"
 staged_iso=''
 
@@ -228,7 +230,9 @@ sed -E \
     -e "s|(^[[:space:]]*loopback[[:space:]]+loop[[:space:]]+)/iso/[A-Za-z0-9._-]+\\.iso([[:space:]]*)$|\\1$new_iso_rel\\2|" \
     -e "s/ramdisk_size=[0-9]+/ramdisk_size=$new_ramdisk_kb/" \
     "$current_config" > "$final_config"
-chmod --reference="$current_config" "$final_config"
+config_mode=$(stat -c %a "$current_config")
+[[ $config_mode =~ ^[0-7]{3,4}$ ]] || die 'Could not determine the current GRUB config mode.'
+chmod "$config_mode" "$final_config"
 new_loopback_count=$(grep -Fc "loopback loop $new_iso_rel" "$final_config" || true)
 (( new_loopback_count == 1 )) || die 'Could not prepare the new GRUB ISO path.'
 new_ramdisk_count=$(grep -Fc "ramdisk_size=$new_ramdisk_kb" "$final_config" || true)
