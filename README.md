@@ -17,8 +17,8 @@ Boot a **live image or emergency recovery OS** from your VPS control panel. If a
 ## 2. Run the installer
 
 ```bash
-curl -o install-bios.sh https://raw.githubusercontent.com/MatthewScholefield/lightwhale-vps-install/main/install-bios.sh
-sudo bash install-bios.sh
+curl -o install-uefi.sh https://raw.githubusercontent.com/MatthewScholefield/lightwhale-vps-install/main/install-uefi.sh
+sudo bash install-uefi.sh
 ```
 
 Run the rescue environment itself in UEFI mode. Legacy BIOS / CSM boot is not supported.

@@ -23,7 +23,7 @@ data_part=''
 # Print command usage and installation requirements.
 usage() {
     printf '%s\n' \
-        'Usage: sudo bash install-bios.sh' \
+        'Usage: sudo bash install-uefi.sh' \
         '' \
         'Interactive, destructive installer for a dedicated disk (UEFI only).' \
         'Creates a UEFI system partition + an ext2 ISO partition + a Lightwhale data partition.' \
@@ -113,7 +113,7 @@ check_requirements() {
         awk stat mktemp sync rm mkdir sleep cp cat
     )
 
-    (( EUID == 0 )) || die 'Run with sudo bash install-bios.sh.'
+    (( EUID == 0 )) || die 'Run with sudo bash install-uefi.sh.'
     [[ -t 0 && -t 1 ]] || die 'An interactive terminal is required.'
     [[ -d /sys/firmware/efi ]] || die 'Boot the rescue OS in UEFI mode.'
 
@@ -416,7 +416,8 @@ verify_data_partition() {
 print_completion() {
     printf 'Eject the VPS rescue mode / eject the live ISO and restart.\n'
     printf 'Upon first boot, login with `op` / `opsecret` and immediately change password with `passwd`.\n\n'
-    printf 'Future upgrades: mount your startup partition (ie. /dev/sda2) to /mnt/startup, replace /mnt/startup/iso/lightwhale.iso, and update ramdisk_size in /mnt/startup/boot/grub/grub.cfg to the output of `echo $((($(stat -c '%s' /mnt/iso/boot/lightwhale-rootfs) + 1023)/1024))` after `sudo mount -o loop new-lightwhale.iso /mnt/iso`.'
+    printf 'Future upgrades: mount your startup partition (ie. /dev/sda2) to /mnt/startup, replace /mnt/startup/iso/lightwhale.iso, and update ramdisk_size in /mnt/startup/boot/grub/grub.cfg to the output of `echo $((($(stat -c '%s' /mnt/iso/boot/lightwhale-rootfs) + 1023)/1024))` after `sudo mount -o loop new-lightwhale.iso /mnt/iso`.\n'
+    printf 'Or run `update-lightwhale.sh <ISO_HTTPS_URL>` to download and update the ISO and GRUB automatically.\n'
 }
 
 # Run preflight checks, obtain confirmation, and perform the installation.
