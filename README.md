@@ -6,7 +6,7 @@ This guide covers a simple approach for installing the OS to disk (with a focus 
 
 ## Requirements
 
-- An x86-64 server supporting native UEFI boot
+- An x86-64 server supporting either native UEFI boot or legacy BIOS / CSM boot
 - A live/rescue Linux environment (ie. [SystemRescue](https://www.system-rescue.org/Download/) or whatever your VPS provides) and console access
 - A disk named `/dev/sdX`, `/dev/nvme…`, or `/dev/mmcblk…`. Note: Paravirtualized disks like `/dev/vda` are not yet supported
 
@@ -14,20 +14,33 @@ This guide covers a simple approach for installing the OS to disk (with a focus 
 
 Boot a **live image or emergency recovery OS** from your VPS control panel. If an installer opens, close it / navigate to a command prompt.
 
-## 2. Run the installer
+## 2. Choose the boot mode and installer
+
+Choose the mode your server supports and that you want to use for Lightwhale. Boot the rescue environment in that same mode before running the corresponding installer. Both installers erase the entire selected disk.
+
+### UEFI
 
 ```bash
 curl -o install-uefi.sh https://raw.githubusercontent.com/MatthewScholefield/lightwhale-vps-install/main/install-uefi.sh
 sudo bash install-uefi.sh
 ```
 
-Run the rescue environment itself in UEFI mode. Legacy BIOS / CSM boot is not supported.
+The rescue environment and the installed server must boot in native UEFI mode.
+
+### Legacy BIOS / CSM
+
+```bash
+curl -o install-bios.sh https://raw.githubusercontent.com/MatthewScholefield/lightwhale-vps-install/main/install-bios.sh
+sudo bash install-bios.sh
+```
+
+The rescue environment and the installed server must boot in legacy BIOS / CSM mode, not UEFI-only mode.
 
 Once finished, after a restart you should see the lightwhale login prompt and can login via `op` / `opsecret`.
 
 ## Update Lightwhale
 
-Boot the VPS into its UEFI rescue environment and back up important data first. The updater downloads and validates the new ISO in `/var/tmp`, then temporarily backs up the current ISO there before replacing it on `LWBOOT`. The data partition is not modified. `/var/tmp` needs space for the download and the previous ISO; `LWBOOT` needs space for the new ISO after the old one is removed. These filesystems must be separate.
+Boot the VPS into a rescue environment and back up important data first. The updater works with either installed boot mode because both installers use the same `LWBOOT` layout. It downloads and validates the new ISO in `/var/tmp`, then temporarily backs up the current ISO there before replacing it on `LWBOOT`. The data partition is not modified. `/var/tmp` needs space for the download and the previous ISO; `LWBOOT` needs space for the new ISO after the old one is removed. These filesystems must be separate.
 
 ```bash
 curl -o update-lightwhale.sh https://raw.githubusercontent.com/MatthewScholefield/lightwhale-vps-install/main/update-lightwhale.sh
