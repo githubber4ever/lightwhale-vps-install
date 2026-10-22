@@ -202,9 +202,10 @@ for orphan in "$boot_mount"/iso/lightwhale-update-*.iso; do
     rm -f -- "$orphan" || die "Could not remove orphaned update ISO: $orphan"
 done
 
-available_bytes=$(df -B1 --output=avail "$boot_mount" | awk 'NR == 2 { print $1 }')
-[[ $available_bytes =~ ^[0-9]+$ ]] || die 'Could not determine free space on LWBOOT.'
-(( available_bytes >= new_iso_bytes + 1048576 )) ||
+available_kb=$(df -Pk "$boot_mount" | awk 'NR == 2 { print $4 }')
+[[ $available_kb =~ ^[0-9]+$ ]] || die 'Could not determine free space on LWBOOT.'
+required_kb=$(( (new_iso_bytes + 1048576 + 1023) / 1024 ))
+(( available_kb >= required_kb )) ||
     die 'Not enough free space on LWBOOT to stage the new ISO safely.'
 
 stamp=$(date -u +%Y%m%dT%H%M%SZ)-$$
