@@ -28,6 +28,26 @@ usage() {
     printf 'Usage: sudo bash update-lightwhale.sh [--atomic] [--force] <ISO_HTTPS_URL>\n'
 }
 
+# GRUB adds this init and the ISO's squashfs to the upstream initramfs.
+write_initramfs_init() {
+    cat > "$1" <<'EOF'
+#!/bin/sh
+fail() { echo "$*" >&2; exec /bin/sh; }
+mount -t devtmpfs devtmpfs /dev || fail 'Cannot mount /dev'
+mount -t proc proc /proc || fail 'Cannot mount /proc'
+mount -t sysfs sysfs /sys || fail 'Cannot mount /sys'
+if (exec 0</dev/console) 2>/dev/null; then
+    exec 0</dev/console 1>/dev/console 2>/dev/console
+fi
+mkdir /rootfs || fail 'Cannot create /rootfs'
+mount -t squashfs -o loop,ro /rootfs.squashfs /rootfs || fail 'Cannot mount Lightwhale root filesystem'
+mount -o move /dev /rootfs/dev || fail 'Cannot move /dev'
+mount -o move /proc /rootfs/proc || fail 'Cannot move /proc'
+mount -o move /sys /rootfs/sys || fail 'Cannot move /sys'
+exec switch_root /rootfs /sbin/init "$@"
+EOF
+}
+
 cleanup() {
     local status=$?
     local mounted=0
@@ -132,7 +152,7 @@ downloaded_iso_basename=${url_path##*/}
     die 'ISO URL must end with a safe .iso filename.'
 (( EUID == 0 )) || die 'Run with sudo.'
 
-for command_name in awk blkid chmod cmp cp curl df findmnt grep mount mountpoint mv mktemp readlink rm sed stat sync umount; do
+for command_name in awk blkid cat chmod cmp cp curl df findmnt grep mount mountpoint mv mktemp readlink rm stat sync umount; do
     command -v "$command_name" >/dev/null || die "Missing command: $command_name"
 done
 
@@ -191,7 +211,7 @@ for required_file in boot/lightwhale-kernel boot/lightwhale-rootfs boot/grub/gru
 done
 
 new_ramdisk_kb=$(awk '
-    {
+    $1 == "linux" {
         for (i = 1; i <= NF; i++) {
             if ($i ~ /^ramdisk_size=[0-9]+$/) {
                 sub(/^ramdisk_size=/, "", $i)
@@ -201,14 +221,19 @@ new_ramdisk_kb=$(awk '
         }
     }
 ' "$iso_mount/boot/grub/grub.cfg")
-[[ $new_ramdisk_kb =~ ^[0-9]+$ ]] ||
-    die 'New ISO has no numeric ramdisk_size in its GRUB configuration.'
-new_ramdisk_kb=$((10#$new_ramdisk_kb))
-(( new_ramdisk_kb > 0 && new_ramdisk_kb <= 2147483647 )) ||
-    die 'New ISO ramdisk_size is outside the supported range.'
-rootfs_bytes=$(stat -c %s "$iso_mount/boot/lightwhale-rootfs")
-(( new_ramdisk_kb >= (rootfs_bytes + 1023) / 1024 )) ||
-    die 'New ISO ramdisk_size is smaller than its root filesystem.'
+if [[ $new_ramdisk_kb =~ ^[0-9]+$ ]]; then
+    new_boot_layout=ramdisk
+    new_ramdisk_kb=$((10#$new_ramdisk_kb))
+    (( new_ramdisk_kb > 0 && new_ramdisk_kb <= 2147483647 )) ||
+        die 'New ISO ramdisk_size is outside the supported range.'
+    rootfs_bytes=$(stat -c %s "$iso_mount/boot/lightwhale-rootfs")
+    (( new_ramdisk_kb >= (rootfs_bytes + 1023) / 1024 )) ||
+        die 'New ISO ramdisk_size is smaller than its root filesystem.'
+elif [[ -s $iso_mount/boot/lightwhale-initramfs ]]; then
+    new_boot_layout=initramfs
+else
+    die 'New ISO has no numeric ramdisk_size and no lightwhale-initramfs in its GRUB configuration.'
+fi
 umount "$iso_mount"
 
 current_config=$boot_mount/boot/grub/grub.cfg
@@ -223,23 +248,10 @@ old_iso_rel=$(awk '
 old_iso_path=$boot_mount$old_iso_rel
 [[ -s $old_iso_path ]] || die "Installed GRUB ISO is missing: $old_iso_path"
 
-ramdisk_count=$(grep -Ec '(^|[[:space:]])ramdisk_size=[0-9]+([[:space:]]|$)' "$current_config" || true)
-(( ramdisk_count == 1 )) ||
-    die 'Expected exactly one numeric ramdisk_size in the installed GRUB config.'
-old_ramdisk_kb=$(awk '
-    {
-        for (i = 1; i <= NF; i++) {
-            if ($i ~ /^ramdisk_size=[0-9]+$/) {
-                sub(/^ramdisk_size=/, "", $i)
-                print $i
-                exit
-            }
-        }
-    }
-' "$current_config")
-old_ramdisk_kb=$((10#$old_ramdisk_kb))
-(( old_ramdisk_kb > 0 && old_ramdisk_kb <= 2147483647 )) ||
-    die 'Installed GRUB ramdisk_size is outside the supported range.'
+kernel_count=$(grep -Ec '^[[:space:]]*linux[[:space:]]+\(loop\)/boot/lightwhale-kernel([[:space:]]|$)' "$current_config" || true)
+initrd_count=$(grep -Ec '^[[:space:]]*initrd[[:space:]]+\(loop\)/boot/lightwhale-(rootfs|initramfs)([[:space:]]|$)' "$current_config" || true)
+(( kernel_count == 1 && initrd_count == 1 )) ||
+    die 'Expected exactly one Lightwhale kernel and initrd in the installed GRUB config.'
 
 new_iso_bytes=$(stat -c %s "$work/lightwhale.iso")
 new_iso_basename=$downloaded_iso_basename
@@ -298,17 +310,36 @@ fi
 final_config=$(mktemp "$boot_mount/boot/grub/.grub.cfg.update.XXXXXX")
 rollback_config=$(mktemp "$boot_mount/boot/grub/.grub.cfg.rollback.XXXXXX")
 cp -p -- "$current_config" "$rollback_config"
-sed -E \
-    -e "s|(^[[:space:]]*loopback[[:space:]]+loop[[:space:]]+)/iso/[A-Za-z0-9._-]+\\.iso([[:space:]]*)$|\\1$new_iso_rel\\2|" \
-    -e "s/ramdisk_size=[0-9]+/ramdisk_size=$new_ramdisk_kb/" \
-    "$current_config" > "$final_config"
+if [[ $new_boot_layout == initramfs ]]; then
+    initrd_args='(loop)/boot/lightwhale-initramfs newc:rootfs.squashfs:(loop)/boot/lightwhale-rootfs newc:init:/boot/grub/lightwhale-init'
+    write_initramfs_init "$work/lightwhale-init"
+    cp -- "$work/lightwhale-init" "$boot_mount/boot/grub/lightwhale-init"
+    chmod 644 "$boot_mount/boot/grub/lightwhale-init"
+else
+    initrd_args='(loop)/boot/lightwhale-rootfs'
+fi
+awk -v iso="$new_iso_rel" -v layout="$new_boot_layout" -v size="$new_ramdisk_kb" -v initrd="$initrd_args" '
+    $1 == "loopback" && $2 == "loop" && $3 ~ /^\/iso\/[A-Za-z0-9._-]+\.iso$/ {
+        sub(/\/iso\/[A-Za-z0-9._-]+\.iso/, iso)
+    }
+    $1 == "linux" && $2 == "(loop)/boot/lightwhale-kernel" {
+        if (layout == "ramdisk")
+            $0 = "    linux (loop)/boot/lightwhale-kernel root=/dev/ram0 ramdisk_size=" size " console=tty0 consoleblank=300"
+        else
+            $0 = "    linux (loop)/boot/lightwhale-kernel console=tty0 consoleblank=300"
+    }
+    $1 == "initrd" && ($2 == "(loop)/boot/lightwhale-rootfs" || $2 == "(loop)/boot/lightwhale-initramfs") {
+        $0 = "    initrd " initrd
+    }
+    { print }
+' "$current_config" > "$final_config"
 config_mode=$(stat -c %a "$current_config")
 [[ $config_mode =~ ^[0-7]{3,4}$ ]] || die 'Could not determine the current GRUB config mode.'
 chmod "$config_mode" "$final_config"
 new_loopback_count=$(grep -Fc "loopback loop $new_iso_rel" "$final_config" || true)
 (( new_loopback_count == 1 )) || die 'Could not prepare the new GRUB ISO path.'
-new_ramdisk_count=$(grep -Fc "ramdisk_size=$new_ramdisk_kb" "$final_config" || true)
-(( new_ramdisk_count == 1 )) || die 'Could not prepare the new GRUB ramdisk_size.'
+grep -Fq "initrd $initrd_args" "$final_config" ||
+    die 'Could not prepare the new GRUB initrd.'
 
 if (( ! atomic_mode )); then
     old_iso_backup=$work/previous-lightwhale.iso
@@ -369,6 +400,6 @@ rm -f -- "$rollback_config" ||
 rollback_config=''
 sync || printf 'Warning: final filesystem sync reported an error.\n' >&2
 
-printf '\nUpgrade staged successfully. GRUB ramdisk_size is %s KiB.\n' "$new_ramdisk_kb"
+printf '\nUpgrade staged successfully. Boot layout: %s.\n' "$new_boot_layout"
 printf 'Active ISO: %s\n' "$new_iso_rel"
 printf 'Reboot to start Lightwhale from the new ISO.\n'

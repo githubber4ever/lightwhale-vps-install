@@ -1,4 +1,4 @@
- #!/usr/bin/env bash
+#!/usr/bin/env bash
 # Provision a dedicated disk for legacy BIOS Lightwhale boot and persistence.
 set -Eeuo pipefail
 export LC_ALL=C
@@ -14,6 +14,7 @@ url=''
 grub_install=''
 bios_modules=''
 ramdisk_kb=''
+boot_layout=''
 boot_mib=''
 boot_end=''
 boot_part=''
@@ -224,7 +225,7 @@ download_iso() {
         "$url"
 }
 
-# Validate the ISO contents and extract its required RAM disk size.
+# Validate the ISO contents and identify its boot layout.
 inspect_iso() {
     local file rootfs_bytes
     local -a required_files=(
@@ -242,7 +243,7 @@ inspect_iso() {
     done
 
     ramdisk_kb=$(awk '
-        {
+        $1 == "linux" {
             for (i = 1; i <= NF; i++) {
                 if ($i ~ /^ramdisk_size=[0-9]+$/) {
                     sub(/^ramdisk_size=/, "", $i)
@@ -253,12 +254,16 @@ inspect_iso() {
         }
     ' "$work/iso/boot/grub/grub.cfg")
 
-    [[ $ramdisk_kb =~ ^[0-9]+$ ]] ||
-        die 'ISO has no numeric ramdisk_size in its GRUB configuration.'
-
-    rootfs_bytes=$(stat -c %s "$work/iso/boot/lightwhale-rootfs")
-    (( ramdisk_kb >= (rootfs_bytes + 1023) / 1024 )) ||
-        die 'ISO ramdisk_size is smaller than its root filesystem.'
+    if [[ $ramdisk_kb =~ ^[0-9]+$ ]]; then
+        boot_layout=ramdisk
+        rootfs_bytes=$(stat -c %s "$work/iso/boot/lightwhale-rootfs")
+        (( ramdisk_kb >= (rootfs_bytes + 1023) / 1024 )) ||
+            die 'ISO ramdisk_size is smaller than its root filesystem.'
+    elif [[ -s $work/iso/boot/lightwhale-initramfs ]]; then
+        boot_layout=initramfs
+    else
+        die 'ISO has no numeric ramdisk_size and no lightwhale-initramfs in its GRUB configuration.'
+    fi
 
     umount "$work/iso"
 }
@@ -352,13 +357,42 @@ prepare_filesystems() {
     mkdir -p "$work/boot/iso" "$work/boot/boot/grub"
 }
 
-# Write a GRUB menu that boots the ISO using its filesystem UUID and RAM disk size.
+# GRUB adds this init and the ISO's squashfs to the upstream initramfs.
+write_initramfs_init() {
+    cat > "$1" <<'EOF'
+#!/bin/sh
+fail() { echo "$*" >&2; exec /bin/sh; }
+mount -t devtmpfs devtmpfs /dev || fail 'Cannot mount /dev'
+mount -t proc proc /proc || fail 'Cannot mount /proc'
+mount -t sysfs sysfs /sys || fail 'Cannot mount /sys'
+if (exec 0</dev/console) 2>/dev/null; then
+    exec 0</dev/console 1>/dev/console 2>/dev/console
+fi
+mkdir /rootfs || fail 'Cannot create /rootfs'
+mount -t squashfs -o loop,ro /rootfs.squashfs /rootfs || fail 'Cannot mount Lightwhale root filesystem'
+mount -o move /dev /rootfs/dev || fail 'Cannot move /dev'
+mount -o move /proc /rootfs/proc || fail 'Cannot move /proc'
+mount -o move /sys /rootfs/sys || fail 'Cannot move /sys'
+exec switch_root /rootfs /sbin/init "$@"
+EOF
+}
+
+# Write a GRUB menu that boots the ISO using its filesystem UUID.
 write_grub_config() {
-    local boot_uuid
+    local boot_uuid linux_args initrd_args
 
     boot_uuid=$(blkid -s UUID -o value "$boot_part")
     [[ $boot_uuid =~ ^[0-9a-fA-F-]+$ ]] ||
         die 'Could not determine boot filesystem UUID.'
+
+    if [[ $boot_layout == initramfs ]]; then
+        write_initramfs_init "$work/boot/boot/grub/lightwhale-init"
+        linux_args='console=tty0 consoleblank=300'
+        initrd_args='(loop)/boot/lightwhale-initramfs newc:rootfs.squashfs:(loop)/boot/lightwhale-rootfs newc:init:/boot/grub/lightwhale-init'
+    else
+        linux_args="root=/dev/ram0 ramdisk_size=$ramdisk_kb console=tty0 consoleblank=300"
+        initrd_args='(loop)/boot/lightwhale-rootfs'
+    fi
 
     cat > "$work/boot/boot/grub/grub.cfg" <<EOF
 set default=0
@@ -371,8 +405,8 @@ menuentry 'Lightwhale' {
     insmod search_fs_uuid
     search --no-floppy --fs-uuid --set=root $boot_uuid
     loopback loop /iso/lightwhale.iso
-    linux (loop)/boot/lightwhale-kernel root=/dev/ram0 ramdisk_size=$ramdisk_kb console=tty0 consoleblank=300
-    initrd (loop)/boot/lightwhale-rootfs
+    linux (loop)/boot/lightwhale-kernel $linux_args
+    initrd $initrd_args
 }
 EOF
 }
@@ -407,7 +441,7 @@ verify_data_partition() {
 print_completion() {
     printf 'Eject the VPS rescue mode / eject the live ISO and restart.\n'
     printf 'Upon first boot, login with `op` / `opsecret` and immediately change password with `passwd`.\n\n'
-    printf 'Future upgrades: mount your startup partition (ie. /dev/sda2) to /mnt/startup, replace /mnt/startup/iso/lightwhale.iso, and update ramdisk_size in /mnt/startup/boot/grub/grub.cfg to the output of `echo $((($(stat -c '%s' /mnt/iso/boot/lightwhale-rootfs) + 1023)/1024))` after `sudo mount -o loop new-lightwhale.iso /mnt/iso`.'
+    printf 'Use update-lightwhale.sh <ISO_HTTPS_URL> to upgrade the ISO and GRUB.\n'
 }
 
 # Run preflight checks, obtain confirmation, and perform the installation.
