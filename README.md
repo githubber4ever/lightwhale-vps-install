@@ -6,7 +6,7 @@ This guide covers a simple approach for installing the OS to disk (with a focus 
 
 ## Requirements
 
-- An x86-64 server supporting BIOS boot
+- An x86-64 server supporting either native UEFI boot or legacy BIOS / CSM boot
 - A live/rescue Linux environment (ie. [SystemRescue](https://www.system-rescue.org/Download/) or whatever your VPS provides) and console access
 - A disk named `/dev/sdX`, `/dev/nvme…`, or `/dev/mmcblk…`. Note: Paravirtualized disks like `/dev/vda` are not yet supported
 
@@ -16,12 +16,33 @@ Boot a **live image or emergency recovery OS** from your VPS control panel. If a
 
 ## 2. Run the installer
 
+The installer detects whether the rescue environment booted in native UEFI or legacy BIOS / CSM mode and sets up the matching boot layout. The installed server must boot in that same mode. It erases the entire selected disk.
+
 ```bash
-curl -o install-bios.sh https://raw.githubusercontent.com/MatthewScholefield/lightwhale-vps-install/main/install-bios.sh
-sudo bash install-bios.sh
+curl -O https://raw.githubusercontent.com/MatthewScholefield/lightwhale-vps-install/main/install.sh
+sudo bash install.sh
 ```
 
 Once finished, after a restart you should see the lightwhale login prompt and can login via `op` / `opsecret`.
+
+## Update Lightwhale
+
+Back up important data first. The updater can run **in place on the running Lightwhale system** or from a rescue environment, and works with either boot mode because both layouts use the same `LWBOOT` partition. The data partition is not modified.
+
+The new ISO is downloaded directly onto `LWBOOT` (not into `/var/tmp`/RAM), validated, and only then is GRUB switched to it. The old ISO stays active until that switch and is removed afterwards, so a failed or interrupted update keeps booting the old version. `LWBOOT` needs room for two ISOs at once.
+
+```bash
+curl -o update-lightwhale.sh https://raw.githubusercontent.com/MatthewScholefield/lightwhale-vps-install/main/update-lightwhale.sh
+sudo bash update-lightwhale.sh https://lightwhale.asklandd.dk/download/lightwhale-latest-x86.iso
+```
+
+After it reports success, reboot. If the update fails before the GRUB switch, the existing ISO remains the active boot target.
+
+Options (before the URL):
+
+- `--force`: replace a destination ISO that already exists but is not active, or re-install an identical active ISO.
+- `--low-space`: for an `LWBOOT` too small for two ISOs. The download and a backup of the current ISO go to `/var/tmp` (needs RAM/disk for both), the old ISO is removed, then the new one is copied. Less safe against power loss in the middle of the copy.
+
 
 *Suggested next steps:*
  1. **Change passowrd:** Change password via `passwd`
